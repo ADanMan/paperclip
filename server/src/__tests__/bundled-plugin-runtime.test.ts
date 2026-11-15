@@ -74,7 +74,9 @@ describe("current image plugin runtime loader", () => {
 describe("pluginWorkerImportArgs", () => {
   it("passes an absolute loader path to a plugin worker in a form Node can import on every platform", () => {
     const { loader } = fixture();
-    const output = execFileSync(process.execPath, [...pluginWorkerImportArgs(loader), "-e", "process.stdout.write('loaded')"], { encoding: "utf8" });
+    const specialPath = path.join(path.dirname(loader), "loader #1.mjs");
+    fs.renameSync(loader, specialPath);
+    const output = execFileSync(process.execPath, [...pluginWorkerImportArgs(specialPath), "-e", "process.stdout.write('loaded')"], { encoding: "utf8" });
     expect(output).toBe("loaded");
   });
 });
