@@ -1143,6 +1143,21 @@ describe("served model and provider", () => {
     expect(result).not.toHaveProperty("biller");
   });
 
+  it("uses the usage model when the top-level model names the API server", () => {
+    const { runtime: _runtime, ...withoutRuntime } = payload;
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "run-1",
+        status: "completed",
+        payload: { ...withoutRuntime, usage: { ...payload.usage, model: "gpt-5.5" } },
+      },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.model).toBe("gpt-5.5");
+  });
+
   it("keeps a top-level model that is not the API server name", () => {
     const { runtime: _runtime, ...withoutRuntime } = payload;
     const result = mapFinalResultForTest({

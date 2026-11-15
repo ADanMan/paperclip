@@ -733,8 +733,8 @@ function extractRuntime(value: unknown): { provider: string | null; model: strin
 
 function extractModel(value: unknown): string | null {
   const record = asRecord(value);
-  const model = extractRuntime(value).model ?? nonEmpty(record?.model) ?? nonEmpty(asRecord(record?.usage)?.model);
-  return model === HERMES_API_SERVER_MODEL ? null : model;
+  const candidates = [extractRuntime(value).model, nonEmpty(record?.model), nonEmpty(asRecord(record?.usage)?.model)];
+  return candidates.find(model => model !== null && model !== HERMES_API_SERVER_MODEL) ?? null;
 }
 
 function extractErrorMessage(value: unknown): string | null {
