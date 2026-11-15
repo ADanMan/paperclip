@@ -628,11 +628,13 @@ function parseUsage(value: unknown): UsageSummary | undefined {
     0,
     asNumber(source.input_tokens ?? source.inputTokens ?? source.input, 0) - cacheReadTokens,
   );
+  const cacheWriteTokens = Math.min(inputTokens, asNumber(source.cache_write_tokens ?? source.cacheWriteTokens, 0));
   if (inputTokens <= 0 && outputTokens <= 0 && cachedInputTokens <= 0) return undefined;
   return {
     inputTokens,
     outputTokens,
     ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
   };
 }
 

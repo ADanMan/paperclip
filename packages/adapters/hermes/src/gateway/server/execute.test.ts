@@ -773,13 +773,13 @@ describe("mapFinalResultForTest", () => {
         payload: {
           status: "completed",
           output: "done",
-          usage: { input_tokens: 620, output_tokens: 7, total_tokens: 627, cache_read_tokens: 570, cache_write_tokens: 0 },
+          usage: { input_tokens: 620, output_tokens: 7, total_tokens: 627, cache_read_tokens: 570, cache_write_tokens: 10 },
         },
       },
       outputChunks: [],
       sessionKey: "session-key",
       strategy: "issue",
     });
-    expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 7, cachedInputTokens: 570 });
+    expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 7, cachedInputTokens: 570, cacheWriteTokens: 10 });
   });
 });
