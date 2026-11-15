@@ -67,6 +67,17 @@ describe("issue properties document annotation mounting", () => {
     container.remove();
   });
 
+  it("offers Markdown copy and download on the current plan", async () => {
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<IssuePropertiesPlansTab issue={issue} />));
+      expect(container.querySelector('button[aria-label="Copy Markdown"]')).not.toBeNull();
+      expect(container.querySelector('button[aria-label="Download Markdown"]')).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   it("uses the issue document key on the Plan tab", async () => {
     const root = createRoot(container);
     await act(async () => root.render(<IssuePropertiesPlansTab issue={issue} />));
