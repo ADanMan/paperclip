@@ -42,13 +42,17 @@ API: `present` — representative operation IDs:
 
 - `GET /api/issues/{id}/documents`.
 - `PUT /api/issues/{id}/documents/{key}`.
+- `DELETE /api/issues/{id}/documents/{key}`.
 - `POST /api/issues/{id}/documents/{key}/revisions/{revisionId}/restore`.
 
 Agent access: `available` — Native list/read/write documents; other-task bridge; REST /
 CLI / MCP.
 
 Policy: Task/resource visibility, mutation/checkout ownership, revision/lock guards and
-permitted deliverable context.
+permitted deliverable context. A conversation agent may delete a document in its own
+conversation when the mutation, checkout, and deliverable guards allow it. The
+deletion transaction checks the agent interaction policy. Other deletions require
+board authentication. Document locking still requires board authentication.
 
 Native completion evidence accepts the server's relative link only for a document
 attached to the current company/task with a matching current-revision publication
