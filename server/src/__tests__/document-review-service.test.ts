@@ -1,3 +1,4 @@
+import { eq, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -103,6 +104,52 @@ describeEmbeddedPostgres("documentReviewService", () => {
     quote: { exact: "selected text", prefix: "Alpha ", suffix: " omega" },
     position: { normalizedStart: 6, normalizedEnd: 19, markdownStart: 6, markdownEnd: 19 },
   };
+
+  it.each([
+    ["accept", "rejectSuggestion"],
+    ["accept", "resolveSuggestion"],
+    ["rejectSuggestion", "accept"],
+    ["resolveSuggestion", "accept"],
+  ] as const)(
+    "keeps the first decision when %s overlaps %s",
+    async (first, second) => {
+      const { issueId, document } = await createIssueWithDocument();
+      const actor = { actorType: "user" as const, actorId: "board-user", userId: "board-user" };
+      const baseRevisionId = document.latestRevisionId!;
+      const suggestion = await review.createSuggestion(issueId, "plan", {
+        baseRevisionId,
+        baseRevisionNumber: document.latestRevisionNumber,
+        kind: "substitution",
+        selector: selectedTextSelector,
+        proposedText: "better text",
+      }, actor);
+      const decide = (service: typeof review, action: typeof first) => action === "accept"
+        ? service.acceptSuggestion(issueId, "plan", suggestion.id, { baseRevisionId }, actor)
+        : service[action](issueId, "plan", suggestion.id, {}, actor);
+      let competing!: Promise<PromiseSettledResult<unknown>[]>;
+      await db.transaction(async (tx) => {
+        const [connection] = await tx.execute(sql`select pg_backend_pid() as pid`);
+        await decide(documentReviewService(tx), first);
+        competing = Promise.allSettled([decide(review, second)]);
+        await expect.poll(async () => {
+          const [row] = await db.execute(sql`select exists (
+            select 1 from pg_stat_activity where ${connection.pid} = any(pg_blocking_pids(pid))
+          ) as blocked`);
+          return row.blocked;
+        }, { timeout: 3000 }).toBe(true);
+      });
+      const [result] = await competing;
+      expect(result).toMatchObject({ status: "rejected", reason: { status: 409 } });
+      const [stored] = await db.select().from(documentSuggestions).where(eq(documentSuggestions.id, suggestion.id));
+      const revisions = await docs.listIssueDocumentRevisions(issueId, "plan");
+      const accepted = first === "accept";
+      expect(revisions).toHaveLength(accepted ? 2 : 1);
+      expect(stored.status).toBe({ accept: "accepted", rejectSuggestion: "rejected", resolveSuggestion: "resolved" }[first]);
+      expect(stored.acceptedRevisionId).toBe(accepted ? revisions[0].id : null);
+      const [current] = await db.select().from(documents).where(eq(documents.id, stored.documentId));
+      expect(current.latestBody).toBe(accepted ? "Alpha better text omega" : "Alpha selected text omega");
+    },
+  );
 
   it("indexes document-level review threads and pending suggestions for agents", async () => {
     const { issueId, document } = await createIssueWithDocument();

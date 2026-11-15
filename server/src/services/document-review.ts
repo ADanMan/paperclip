@@ -221,7 +221,7 @@ function applySuggestionToBody(body: string, suggestion: DocumentSuggestion) {
   return `${body.slice(0, suggestion.markdownStart)}${replacementText}${body.slice(suggestion.markdownEnd)}`;
 }
 
-export function documentReviewService(db: Db) {
+export function documentReviewService(db: Pick<Db, "select" | "transaction">) {
   async function getIssueDocument(issueId: string, key: string, dbOrTx: any = db): Promise<IssueDocumentRow | null> {
     return dbOrTx
       .select({
@@ -678,7 +678,11 @@ export function documentReviewService(db: Db) {
         rejectedByUserId: actor.userId ?? null,
         rejectedAt: now,
         updatedAt: now,
-      }).where(eq(documentSuggestions.id, suggestion.id)).returning(suggestionSelect);
+      }).where(and(
+        eq(documentSuggestions.id, suggestion.id),
+        eq(documentSuggestions.status, "pending"),
+      )).returning(suggestionSelect);
+      if (!updated) throw conflict("Suggestion is no longer pending");
       return updated;
     }),
 
@@ -704,7 +708,11 @@ export function documentReviewService(db: Db) {
         resolvedByUserId: actor.userId ?? null,
         resolvedAt: now,
         updatedAt: now,
-      }).where(eq(documentSuggestions.id, suggestion.id)).returning(suggestionSelect);
+      }).where(and(
+        eq(documentSuggestions.id, suggestion.id),
+        eq(documentSuggestions.status, "pending"),
+      )).returning(suggestionSelect);
+      if (!updated) throw conflict("Suggestion is no longer pending");
       return updated;
     }),
 
@@ -777,7 +785,11 @@ export function documentReviewService(db: Db) {
         acceptedAt: now,
         acceptedRevisionId: revision.id,
         updatedAt: now,
-      }).where(eq(documentSuggestions.id, suggestion.id)).returning(suggestionSelect);
+      }).where(and(
+        eq(documentSuggestions.id, suggestion.id),
+        eq(documentSuggestions.status, "pending"),
+      )).returning(suggestionSelect);
+      if (!updatedSuggestion) throw conflict("Suggestion is no longer pending");
 
       return {
         suggestion: updatedSuggestion,
