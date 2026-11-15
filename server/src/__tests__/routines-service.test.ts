@@ -69,13 +69,14 @@ function dispatchedRun<T extends object>(result: T): Extract<T, { id: string }> 
 }
 
 describeEmbeddedPostgres("routine service live-execution coalescing", () => {
+  const poolName = `routine-dispatch-test-${randomUUID()}`;
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
     process.env.PAPERCLIP_API_URL = "http://localhost:3100";
     if (!externalUrl) tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-service-");
-    db = createDb(externalUrl ?? tempDb!.connectionString);
+    db = createDb(externalUrl ?? tempDb!.connectionString, { applicationName: poolName });
   }, 20_000);
 
   afterEach(async () => {
@@ -1867,7 +1868,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     if (outcome === "timeout") {
       const rescue = createDb(externalUrl ?? tempDb!.connectionString);
       await rescue.execute(sql`select pg_terminate_backend(pid) from pg_stat_activity
-        where datname = current_database() and pid <> pg_backend_pid()`);
+        where datname = current_database() and application_name = ${poolName} and pid <> pg_backend_pid()`);
       await rescue.$client.end({ timeout: 1 });
       await dispatch.catch(() => undefined);
     }
