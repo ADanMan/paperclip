@@ -48,4 +48,21 @@ describe("agentService.listConfigRevisions limit", () => {
     const limitedRevisions = await svc.listConfigRevisions(agentId, { limit: 5 });
     expect(limitedRevisions.map((r) => (r.beforeConfig as { step: number }).step)).toEqual([7, 6, 5, 4, 3]);
   });
+
+  it("keeps the same prefix when the limit falls inside a timestamp tie", async () => {
+    const [agent] = await db.insert(agents).values({
+      companyId, name: "Tied revisions", role: "engineer", adapterType: "process",
+    }).returning();
+    const ids = [2, 1, 3].map((n) => `00000000-0000-4000-8000-00000000000${n}`);
+    const createdAt = new Date("2026-11-14T12:00:00Z");
+    await db.insert(agentConfigRevisions).values(ids.map((id) => ({
+      id, agentId: agent.id, companyId, beforeConfig: {}, afterConfig: {}, createdAt,
+    })));
+    const service = agentService(db);
+    const expected = [ids[2], ids[0], ids[1]];
+    const limited = await service.listConfigRevisions(agent.id, { limit: 2 });
+    expect(limited.map((revision) => revision.id)).toEqual(expected.slice(0, 2));
+    const all = await service.listConfigRevisions(agent.id);
+    expect(all.map((revision) => revision.id)).toEqual(expected);
+  });
 });

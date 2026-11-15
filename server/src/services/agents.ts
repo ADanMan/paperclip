@@ -82,7 +82,7 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .select()
         .from(agentConfigRevisions)
         .where(eq(agentConfigRevisions.agentId, id))
-        .orderBy(desc(agentConfigRevisions.createdAt));
+        .orderBy(desc(agentConfigRevisions.createdAt), desc(agentConfigRevisions.id));
       return options?.limit !== undefined ? query.limit(options.limit) : query;
     },
 
