@@ -1,11 +1,11 @@
 /**
- * Universal checks U1–U4: scenario-independent rules graded on every task of
+ * Universal checks U1–U5: scenario-independent rules graded on every task of
  * every wave, whatever its workload. Pure functions over observer samples (no
  * I/O), so they also run over saved evidence (`universal-audit.ts`).
  *
  *   U1 liveness        every non-terminal task has a live owner or a visible, actionable item
  *   U2 retry loop      the same failure does not repeat without the task changing state
- *   U3 diagnosable     every failed run names a specific cause
+ *   U3 diagnosable     every failed run names a specific cause (its code, or a recorded failureCause)
  *   U4 stale notices   no failure or Retry notice outlives later successful work
  *
  * Each rule is either `enforced` (a violation fails the task) or a warning
@@ -14,7 +14,7 @@
  */
 import type { RunSample, TaskRecord, TaskSample } from "./types.js";
 
-export type UniversalId = "U1" | "U2" | "U3" | "U4";
+export type UniversalId = "U1" | "U2" | "U3" | "U4" | "U5";
 export interface UniversalResult { verdict: "pass" | "fail" | "n/a"; detail: string; enforced: boolean;
   /** Measurements behind the verdict (milliseconds or counts), for bound tuning. */
   metrics?: Record<string, number> }
@@ -31,10 +31,19 @@ export interface UniversalBounds {
   sameFailureRuns: number;
   /** U4: longest a failure or Retry notice may remain after a later run succeeded. */
   staleNoticeMs: number;
+  maxRuns: number;
+  declaredQueuedMs?: number;
+}
+
+export type SlotFree = (runId: string, at: number) => boolean | null;
+
+export function declaredQueueBoundMs(mix: { runs: number; queue: number; turnMinutes: readonly [number, number] } | undefined): number | undefined {
+  if (!mix || mix.queue <= 0) return undefined;
+  return Math.ceil(mix.queue / Math.max(1, mix.runs)) * (mix.turnMinutes[1] + 5) * 60_000;
 }
 
 /**
- * Defaults from the 2026-11-09 audit of 74 saved waves (1,592 tasks; README
+ * Defaults from the 2026-11-09 audit of 79 saved waves (1,620 tasks; README
  * "Universal checks"). Override with RESTART_CHAOS_U1_ORPHAN_SECONDS,
  * RESTART_CHAOS_U1_QUEUED_SECONDS, RESTART_CHAOS_U2_SAME_FAILURE_RUNS and
  * RESTART_CHAOS_U4_STALE_SECONDS.
@@ -45,10 +54,11 @@ export const DEFAULT_UNIVERSAL_BOUNDS: UniversalBounds = {
   silentRunMs: 3 * 60_000,
   sameFailureRuns: 3,
   staleNoticeMs: 60_000,
+  maxRuns: 10,
 };
 
 /** Rules that fail a task. The rest are warnings until the audit shows no false positive on known-good waves. */
-export const ENFORCED_UNIVERSAL: ReadonlySet<UniversalId> = new Set<UniversalId>(["U1", "U2", "U4"]);
+export const ENFORCED_UNIVERSAL: ReadonlySet<UniversalId> = new Set<UniversalId>(["U1", "U2", "U4", "U5"]);
 
 export function universalBounds(env: NodeJS.ProcessEnv = process.env): UniversalBounds {
   const seconds = (name: string, fallback: number) => {
@@ -64,6 +74,7 @@ export function universalBounds(env: NodeJS.ProcessEnv = process.env): Universal
     silentRunMs: DEFAULT_UNIVERSAL_BOUNDS.silentRunMs,
     sameFailureRuns: Math.round(seconds("RESTART_CHAOS_U2_SAME_FAILURE_RUNS", DEFAULT_UNIVERSAL_BOUNDS.sameFailureRuns)),
     staleNoticeMs: seconds("RESTART_CHAOS_U4_STALE_SECONDS", DEFAULT_UNIVERSAL_BOUNDS.staleNoticeMs / 1000) * 1000,
+    maxRuns: Math.round(seconds("RESTART_CHAOS_U5_MAX_RUNS", DEFAULT_UNIVERSAL_BOUNDS.maxRuns)),
   };
 }
 
@@ -78,6 +89,14 @@ const ready = (sample: TaskSample) => sample.reachable && sample.serverReady;
  * shows it as "adapter failed".
  */
 export const GENERIC_FAILURE_CODES: ReadonlySet<string> = new Set(["", "error", "unknown", "unknown_error", "failed", "adapter_failed", "internal_error"]);
+/** Server fallbacks that record only that the adapter gave no code: they name nothing specific. */
+const VAGUE_FAILURE_CAUSES: ReadonlySet<string> = new Set(["adapter_reported_error", "object", "string", "undefined"]);
+/** A recorded failureCause that names something: not empty, a bare class, `unknown_error` or a no-code fallback. */
+export function diagnosableFailureCause(cause: string | null | undefined): boolean {
+  const text = (cause ?? "").trim();
+  return text !== "" && !GENERIC_FAILURE_CODES.has(text.toLowerCase()) && !VAGUE_FAILURE_CAUSES.has(text)
+    && !bareCauseMessage(text);
+}
 const FAILED_RUN = new Set(["failed", "timed_out"]);
 
 /** A message whose only cause is a bare exception class or "unknown" (the #20385 "last cause: Error" class). */
@@ -106,7 +125,14 @@ function finalRuns(record: TaskRecord): Map<string, RunSample & { firstSeenAt: n
 }
 
 /** U1: what keeps this task moving at this sample, or null when nothing does. */
-export function liveOwner(sample: TaskSample, queuedFor: ReadonlyMap<string, number>, bounds: UniversalBounds): string | null {
+/** A retry timer or an accepted Retry that waits on the system, with no run dispatched yet. */
+export function retryTimer(sample: TaskSample): boolean {
+  const dispatched = (sample.runs ?? []).some(run => ["queued", "running", "scheduled_retry"].includes(run.status));
+  return !dispatched && Boolean(sample.scheduledRetry || sample.interruption?.retryWait || sample.interruption?.state === "retry_scheduled");
+}
+
+/** `timerFor`: ready-server time an accepted Retry has waited on the system with no run dispatched. */
+export function liveOwner(sample: TaskSample, queuedFor: ReadonlyMap<string, number>, bounds: UniversalBounds, timerFor = 0): string | null {
   for (const run of sample.runs ?? []) {
     if (run.status === "running") {
       if (run.toolInFlight || run.processAlive) return `run ${run.id} running (tool or process alive)`;
@@ -118,17 +144,23 @@ export function liveOwner(sample: TaskSample, queuedFor: ReadonlyMap<string, num
     }
   }
   // A retry row stays on the issue after its run is dispatched; once a run exists the run's own bounds above decide.
-  const dispatched = (sample.runs ?? []).some(run => ["queued", "running", "scheduled_retry"].includes(run.status));
-  if (!dispatched && (sample.scheduledRetry || sample.interruption?.retryWait || sample.interruption?.state === "retry_scheduled")) return "retry timer";
+  // A scheduled retry is a timer (samples carry no due time, so it is not bounded here). An accepted Retry
+  // that waits on the system (`retryWait`) is an owner only within the queue bound.
+  if (retryTimer(sample) && (!sample.interruption?.retryWait || timerFor <= bounds.queuedMs)) return "retry timer";
   if (sample.activeRecoveryAction && sample.recoveryOwner !== "board") return "system recovery action";
+  if (sample.waitingOnChildren) return "open subtasks";
   return null;
 }
 
 /** U1: an item a person can see and act on (Retry, a question, an approval, a board-owned recovery, a named blocker). */
 export function actionableItem(sample: TaskSample): string | null {
   const interruption = sample.interruption;
-  if (interruption?.canRetry) return "Retry";
+  // A named user action (for example `confirm_run_stopped`) is shown even while an accepted Retry waits.
   if (interruption?.userAction) return `user action ${interruption.userAction}`;
+  // Otherwise an accepted Retry that waits on the system ("Retry is waiting for Paperclip to ...") leaves nothing
+  // for the person to do: the Retry button, the failed notice and the blocker describe work they already asked for.
+  if (interruption?.retryWait) return null;
+  if (interruption?.canRetry) return "Retry";
   if (interruption && (interruption.state === "waiting_for_user" || interruption.state === "failed")) return `interruption ${interruption.state}`;
   if (sample.activeRecoveryAction && sample.recoveryOwner === "board") return "board recovery action";
   if (sample.executionBlocker) return "execution blocker";
@@ -137,24 +169,34 @@ export function actionableItem(sample: TaskSample): string | null {
   return null;
 }
 
-export function gradeU1(record: TaskRecord, bounds: UniversalBounds): Omit<UniversalResult, "enforced"> {
+export function gradeU1(record: TaskRecord, bounds: UniversalBounds, slotFree: SlotFree = () => null): Omit<UniversalResult, "enforced"> {
   if (!record.samples.some(ready)) return { verdict: "n/a", detail: "no ready sample" };
   // Ready-server time each run has spent queued (outages do not count).
+  const totalQueued = new Map<string, number>();
+  const freeQueued = new Map<string, number>();
   const queuedFor = new Map<string, number>();
   let orphanMs = 0, worstOrphan = 0, orphanFrom: number | null = null, lastAt: number | null = null;
   let worstQueued = 0, worstQueuedRun = "";
+  let timerFor = 0, worstTimer = 0;
   for (const sample of record.samples) {
     // Outages pause the clock: a down server is the fault's time, not the task's.
     if (!ready(sample)) { lastAt = null; continue; }
     for (const run of sample.runs ?? []) {
       if (run.status === "queued" || run.status === "scheduled_retry") {
-        const waited = (queuedFor.get(run.id) ?? 0) + (lastAt !== null && queuedFor.has(run.id) ? sample.at - lastAt : 0);
-        queuedFor.set(run.id, waited);
+        const step = lastAt !== null && totalQueued.has(run.id) ? sample.at - lastAt : 0;
+        const waited = (totalQueued.get(run.id) ?? 0) + step;
+        totalQueued.set(run.id, waited);
         if (waited > worstQueued) { worstQueued = waited; worstQueuedRun = run.id; }
+        if (bounds.declaredQueuedMs === undefined || run.status !== "queued") { queuedFor.set(run.id, waited); continue; }
+        const free = (freeQueued.get(run.id) ?? 0) + (slotFree(run.id, sample.at) === true ? step : 0);
+        freeQueued.set(run.id, free);
+        queuedFor.set(run.id, waited > bounds.declaredQueuedMs ? Number.POSITIVE_INFINITY : free);
       }
     }
+    timerFor = retryTimer(sample) && sample.interruption?.retryWait ? timerFor + (lastAt !== null ? sample.at - lastAt : 0) : 0;
+    worstTimer = Math.max(worstTimer, timerFor);
     if (TERMINAL_ISSUE.has(sample.issueStatus ?? "")) { orphanMs = 0; orphanFrom = null; lastAt = sample.at; continue; }
-    const owned = liveOwner(sample, queuedFor, bounds) ?? actionableItem(sample);
+    const owned = liveOwner(sample, queuedFor, bounds, timerFor) ?? actionableItem(sample);
     if (owned) { orphanMs = 0; orphanFrom = null; }
     else {
       if (orphanFrom === null) orphanFrom = sample.at;
@@ -162,14 +204,16 @@ export function gradeU1(record: TaskRecord, bounds: UniversalBounds): Omit<Unive
       worstOrphan = Math.max(worstOrphan, orphanMs);
       if (orphanMs > bounds.orphanMs) {
         const queued = (sample.runs ?? []).filter(run => run.status === "queued" || run.status === "scheduled_retry");
-        return { verdict: "fail", metrics: { ownerlessMs: orphanMs, queuedMs: worstQueued }, detail: `no_owner_no_action ${seconds(orphanMs)} in ${sample.issueStatus ?? "unknown"}`
-          + (queued.length ? ` with ${queued.map(run => `${run.id} queued ${seconds(queuedFor.get(run.id) ?? 0)}`).join(",")}` : "")
+        return { verdict: "fail", metrics: { ownerlessMs: orphanMs, queuedMs: worstQueued, retryTimerMs: worstTimer }, detail: `no_owner_no_action ${seconds(orphanMs)} in ${sample.issueStatus ?? "unknown"}`
+          + (queued.length ? ` with ${queued.map(run => `${run.id} queued ${seconds(totalQueued.get(run.id) ?? 0)}`
+            + `${freeQueued.has(run.id) ? ` (${seconds(freeQueued.get(run.id)!)} with a free slot, declared queue bound ${seconds(bounds.declaredQueuedMs!)})` : ""}`).join(",")}` : "")
+          + (timerFor ? ` after a retry wait of ${seconds(timerFor)}${sample.interruption?.retryWait ? " (accepted Retry waiting on the system)" : ""}` : "")
           + ` (interruption ${sample.interruption?.state ?? "none"})` };
       }
     }
     lastAt = sample.at;
   }
-  return { verdict: "pass", metrics: { ownerlessMs: worstOrphan, queuedMs: worstQueued }, detail: `longest ownerless ${seconds(worstOrphan)}; longest queued ${seconds(worstQueued)}${worstQueuedRun ? ` (${worstQueuedRun})` : ""}` };
+  return { verdict: "pass", metrics: { ownerlessMs: worstOrphan, queuedMs: worstQueued, retryTimerMs: worstTimer }, detail: `longest ownerless ${seconds(worstOrphan)}; longest queued ${seconds(worstQueued)}${worstQueuedRun ? ` (${worstQueuedRun})` : ""}` };
 }
 
 /** The issue status seen between two failures (both finish polls included) was not one value throughout. */
@@ -225,8 +269,11 @@ export function gradeU3(record: TaskRecord, db?: UniversalDbEvidence): Omit<Univ
   }
   for (const run of failed) {
     const code = run.errorCode ?? "";
-    if (GENERIC_FAILURE_CODES.has(code.trim().toLowerCase())) vague.push(`${run.id}:code=${code || "none"}`);
-    else if (messages?.has(run.id) && bareCauseMessage(messages.get(run.id))) {
+    // A generic code with a recorded cause (for example `adapter_failed` + `40001`) names what failed.
+    if (diagnosableFailureCause(run.failureCause)) continue;
+    if (GENERIC_FAILURE_CODES.has(code.trim().toLowerCase())) {
+      vague.push(`${run.id}:code=${code || "none"}${run.failureCause ? ` cause=${run.failureCause.slice(0, 80)}` : ""}`);
+    } else if (messages?.has(run.id) && bareCauseMessage(messages.get(run.id))) {
       vague.push(`${run.id}:${code} message=${JSON.stringify((messages.get(run.id) ?? "").slice(0, 120))}`);
     }
   }
@@ -266,15 +313,23 @@ export function gradeU4(record: TaskRecord, bounds: UniversalBounds): Omit<Unive
   return { verdict: "pass", metrics: { staleNoticeMs: worst }, detail: worst ? `notice cleared ${seconds(worst)} after success` : "no notice after success" };
 }
 
+export function gradeU5(record: TaskRecord, bounds: UniversalBounds): Omit<UniversalResult, "enforced"> {
+  const runs = finalRuns(record).size;
+  return runs > bounds.maxRuns
+    ? { verdict: "fail", metrics: { runs }, detail: `run_budget_exceeded ${runs} runs > ${bounds.maxRuns}` }
+    : { verdict: "pass", metrics: { runs }, detail: `${runs} runs` };
+}
+
 export function gradeUniversal(record: TaskRecord, options: { bounds?: UniversalBounds; db?: UniversalDbEvidence;
-  enforced?: ReadonlySet<UniversalId> } = {}): UniversalGrade {
+  enforced?: ReadonlySet<UniversalId>; slotFree?: SlotFree } = {}): UniversalGrade {
   const bounds = options.bounds ?? universalBounds();
   const enforced = options.enforced ?? ENFORCED_UNIVERSAL;
   const results = {
-    U1: gradeU1(record, bounds),
+    U1: gradeU1(record, bounds, options.slotFree),
     U2: gradeU2(record, bounds),
     U3: gradeU3(record, options.db),
     U4: gradeU4(record, bounds),
+    U5: gradeU5(record, bounds),
   };
   return Object.fromEntries(Object.entries(results).map(([id, result]) => [id, { ...result, enforced: enforced.has(id as UniversalId) }])) as UniversalGrade;
 }
