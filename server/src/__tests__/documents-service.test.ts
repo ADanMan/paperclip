@@ -284,7 +284,7 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
       const mutation = mutate[operation]();
       await waitForBlockedSessions(1);
       const edit = svc.upsertIssueDocument({
-        issueId, key, format: "markdown", body: "edited", createdByAgentId: agentId,
+        issueId, key, format: "markdown", body: "edited", createdByAgentId: agentId, lockedDocumentStrategy: "create_new_document",
         baseRevisionId: current.latestRevisionId,
       });
       settled = Promise.allSettled([mutation, edit]);
@@ -301,8 +301,15 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
       expect(edit).toMatchObject({ status: "rejected", reason: { status: 409, message: "Document does not exist yet" } });
       expect(finalDocument).toBeNull();
     } else {
-      expect(edit).toMatchObject({ status: "rejected", reason: { status: 409, message: "Document is locked" } });
-      expect(finalDocument?.latestRevisionId).toBe(current.latestRevisionId);
+      expect(edit).toMatchObject({ status: "fulfilled", value: {
+        created: true, redirectedFromLockedDocument: { id: current.id, key },
+      } });
+      expect(finalDocument).toMatchObject({ latestRevisionId: current.latestRevisionId, body: current.body });
+      expect(finalDocument?.lockedAt).toBeInstanceOf(Date);
+      const copies = (await svc.listIssueDocuments(issueId)).filter((document) => document.id !== current.id);
+      expect(copies).toHaveLength(1);
+      const copy = await svc.getIssueDocumentByKey(issueId, copies[0]!.key);
+      expect(copy).toMatchObject({ body: "edited", latestRevisionNumber: 1, lockedAt: null });
     }
   });
 
