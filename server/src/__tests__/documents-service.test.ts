@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -254,6 +255,55 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
       body: original.body,
       latestRevisionNumber: revised.document.latestRevisionNumber + 3,
     });
+  });
+
+  it.each(["lock", "unlock", "delete"] as const)("serializes an agent %s with a competing edit", async (operation) => {
+    const { issueId, companyId } = await createIssueWithDocuments();
+    const agentId = randomUUID();
+    const key = "plan";
+    await db.insert(agents).values({ id: agentId, companyId, name: "Editor", role: "engineer", adapterType: "process" });
+    const current = (await svc.getIssueDocumentByKey(issueId, key))!;
+    if (operation === "unlock") await svc.lockIssueDocument({ issueId, key, lockedByUserId: "board-user" });
+
+    async function waitForBlockedSessions(count: number) {
+      await expect.poll(async () => {
+        const rows = await db.execute(sql`select count(*)::int as blocked from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock'`);
+        return rows[0]?.blocked;
+      }, { timeout: 5000 }).toBe(count);
+    }
+
+    const mutate = {
+      lock: () => svc.lockIssueDocument({ issueId, key, lockedByAgentId: agentId }),
+      unlock: () => svc.unlockIssueDocument(issueId, key, agentId),
+      delete: () => svc.deleteIssueDocument(issueId, key, agentId),
+    };
+    let settled!: Promise<PromiseSettledResult<unknown>[]>;
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select id from agents where id = ${agentId} for update`);
+      const mutation = mutate[operation]();
+      await waitForBlockedSessions(1);
+      const edit = svc.upsertIssueDocument({
+        issueId, key, format: "markdown", body: "edited", createdByAgentId: agentId,
+        baseRevisionId: current.latestRevisionId,
+      });
+      settled = Promise.allSettled([mutation, edit]);
+      await waitForBlockedSessions(2);
+    });
+
+    const [mutation, edit] = await settled;
+    expect(mutation.status).toBe("fulfilled");
+    const finalDocument = await svc.getIssueDocumentByKey(issueId, key);
+    if (operation === "unlock") {
+      expect(edit.status).toBe("fulfilled");
+      expect(finalDocument).toMatchObject({ body: "edited", latestRevisionNumber: 2, lockedAt: null });
+    } else if (operation === "delete") {
+      expect(edit).toMatchObject({ status: "rejected", reason: { status: 409, message: "Document does not exist yet" } });
+      expect(finalDocument).toBeNull();
+    } else {
+      expect(edit).toMatchObject({ status: "rejected", reason: { status: 409, message: "Document is locked" } });
+      expect(finalDocument?.latestRevisionId).toBe(current.latestRevisionId);
+    }
   });
 
   it("locks and unlocks issue documents", async () => {
