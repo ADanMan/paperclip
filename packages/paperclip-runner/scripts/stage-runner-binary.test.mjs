@@ -156,7 +156,7 @@ test("a source rebuild selects fresh dev bytes while preserving release binaries
     const previousBuild = path.join(root, "previous-build");
     await copyHostFixture(process.execPath, previousBuild);
     await stageRunnerBinary(previousBuild, hostTarget);
-    await stageRunnerBinary(built, path.join(binaryRoot, "paperclip-runnerd"));
+    await stageRunnerBinary(previousBuild, path.join(binaryRoot, "paperclip-runnerd"));
     const platforms = {}, releaseBytes = new Map();
     for (const target of RELEASE_RUNNER_TARGETS) {
       const artifact = path.join(binaryRoot, target, "paperclip-runnerd");
@@ -191,7 +191,7 @@ test("a source rebuild selects fresh dev bytes while preserving release binaries
     assert.deepEqual(selected, { binary: path.join(binaryRoot, "paperclip-runnerd"), sourceBuild: true });
     const published = await stat(selected.binary);
     assert.equal(published.mode & 0o777, 0o755);
-    assert.notDeepEqual(await readFile(selected.binary), oldArtifact);
+    assert.ok(!(await readFile(selected.binary)).equals(oldArtifact), "selected binary still contains the old executable");
     assert.equal((await stat(hostTarget)).ino, oldIdentity.ino);
     assert.deepEqual(await readFile(hostTarget), oldArtifact);
     assert.equal(await readFile(manifestPath, "utf8"), manifest);
