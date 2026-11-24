@@ -57,7 +57,7 @@ If a write's status or receipt is unclear, GET the document to check the saved
 content and revision before retrying. If delivery cannot be confirmed, report
 that limitation instead of claiming the requested document was saved.
 
-## Reply to or resolve an annotation thread
+**Reply to or resolve an annotation thread.**
 
 Use the issue ID and the saved document key. List the open threads and include
 their comments so you can read each conversation before replying:
